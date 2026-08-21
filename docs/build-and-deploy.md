@@ -47,10 +47,11 @@ npm run dev
 | `NEXT_PUBLIC_SUPABASE_URL` | Browser | Supabase 프로젝트 URL |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Browser | 공개 문제를 읽는 publishable key |
 | `SUPABASE_SECRET_KEY` | Secret | 숨은 테스트와 서버 전용 데이터 접근 |
+| `CRON_SECRET` | Secret | Vercel Cron 요청을 인증하는 서버 전용 무작위 값 |
 | `OPENAI_API_KEY` | Secret | 힌트 생성 API key |
 | `OPENAI_MODEL` | Server only | 사용할 모델의 선택적 override |
 
-`SUPABASE_SECRET_KEY`와 `OPENAI_API_KEY`는 Next.js API route에서만 읽고 브라우저 번들이나 Git 기록에 포함하지 않습니다.
+`SUPABASE_SECRET_KEY`, `CRON_SECRET`, `OPENAI_API_KEY`는 Next.js API route에서만 읽고 브라우저 번들이나 Git 기록에 포함하지 않습니다.
 
 ## 검증과 빌드
 
@@ -100,10 +101,17 @@ Vercel Project Settings에는 다음을 등록합니다.
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
 - `SUPABASE_SECRET_KEY`
+- `CRON_SECRET`
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`(선택)
 
 Preview와 Production의 Supabase 데이터를 분리하지 않는 경우 Preview에서도 숨은 문제 데이터가 변경되지 않도록 서버 API의 쓰기 경로와 key 범위를 점검합니다.
+
+### Supabase keepalive Cron
+
+`frontend/vercel.json`은 매일 `03:00 UTC`에 `/api/cron/supabase-keepalive`를 호출합니다. 이 API는 Vercel이 `CRON_SECRET`으로 생성한 Bearer 인증을 확인한 뒤 공개 `problems` 테이블에서 게시된 문제 ID 하나만 읽습니다. 성공 응답은 데이터 없이 `{ "ok": true }`만 반환합니다.
+
+Cron은 Production 배포에서만 실행됩니다. Vercel Project Settings의 Production 환경에 32바이트 이상의 무작위 `CRON_SECRET`을 등록하고, Vercel Cron 목록과 Function 로그에서 실행 결과를 확인합니다. 이 작업은 Free 프로젝트의 활동을 유지하기 위한 운영 보조 장치이며 비정지 SLA를 제공하지 않습니다.
 
 ## 배포 후 점검
 
