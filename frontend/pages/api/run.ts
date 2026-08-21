@@ -1,5 +1,8 @@
+import fs from 'fs';
+import path from 'path';
 import { NextApiRequest, NextApiResponse } from 'next';
-import { Sandbox } from '@vercel/sandbox';
+import { parseRunnerResult } from '../../lib/judge-contract';
+import { EXECUTION_LIMITS, withSandbox } from '../../lib/sandbox-lifecycle';
 
 export const config = {
   maxDuration: 30,
@@ -10,31 +13,27 @@ interface RunResponse {
   output?: string;
   error?: string;
   execution_time?: number;
-  memory_usage?: number;
 }
 
-const RUNNER = `
-import subprocess
-import sys
+const RUNNER = fs.readFileSync(
+  path.join(process.cwd(), 'sandbox', 'judge_runner.py'),
+  'utf8',
+);
 
-try:
-    with open("input.txt", "r", encoding="utf-8") as input_file:
-        input_data = input_file.read()
-
-    result = subprocess.run(
-        [sys.executable, "solution.py"],
-        input=input_data,
-        capture_output=True,
-        text=True,
-        timeout=3,
-    )
-    sys.stdout.write(result.stdout)
-    sys.stderr.write(result.stderr)
-    sys.exit(result.returncode)
-except subprocess.TimeoutExpired:
-    sys.stderr.write("실행 시간이 3초를 초과했습니다.\\n")
-    sys.exit(124)
-`;
+function publicRunError(outcome: ReturnType<typeof parseRunnerResult>['outcome'], stderr: string): string {
+  switch (outcome) {
+    case 'COMPILE_ERROR':
+      return stderr || 'Python 구문을 확인해주세요.';
+    case 'RUNTIME_ERROR':
+      return stderr || '실행 중 오류가 발생했습니다.';
+    case 'TIMED_OUT':
+      return '실행 시간이 3초를 초과했습니다.';
+    case 'OUTPUT_LIMIT':
+      return '출력이 64KiB 제한을 초과했습니다.';
+    case 'OK':
+      return '';
+  }
+}
 
 export default async function handler(
   req: NextApiRequest,
@@ -47,56 +46,56 @@ export default async function handler(
   }
 
   const { code, language, input_data = '' } = req.body || {};
+  const input = String(input_data);
   if (language !== 'python' || typeof code !== 'string') {
     return res.status(400).json({ success: false, error: '현재 Python만 지원됩니다.' });
   }
-
-  if (code.length === 0 || code.length > 20_000 || String(input_data).length > 10_000) {
+  if (
+    code.length === 0
+    || Buffer.byteLength(code, 'utf8') > EXECUTION_LIMITS.codeBytes
+    || Buffer.byteLength(input, 'utf8') > EXECUTION_LIMITS.inputBytes
+  ) {
     return res.status(400).json({
       success: false,
-      error: '코드는 20,000자, 입력은 10,000자 이하로 작성해주세요.',
+      error: '코드는 20,000바이트, 입력은 10,000바이트 이하로 작성해주세요.',
     });
   }
 
-  let sandbox: Sandbox | undefined;
-
   try {
-    sandbox = await Sandbox.create({
-      runtime: 'python3.13',
-      timeout: 15_000,
-      persistent: false,
-      networkPolicy: 'deny-all',
+    const execution = await withSandbox('run', {
+      budgetMs: 10_000,
+      sessionTimeoutMs: 15_000,
+    }, async (sandbox, signal) => {
+      await sandbox.writeFiles([
+        { path: 'solution.py', content: Buffer.from(code, 'utf8') },
+        { path: 'input.txt', content: Buffer.from(input, 'utf8') },
+        { path: 'judge_runner.py', content: Buffer.from(RUNNER, 'utf8') },
+      ], { signal });
+      const command = await sandbox.runCommand('python3', ['judge_runner.py'], {
+        signal,
+        timeoutMs: EXECUTION_LIMITS.commandMs,
+      });
+      const [output, error] = await Promise.all([command.stdout(), command.stderr()]);
+      if (command.exitCode !== 0) {
+        throw new Error(error ? 'runner_failed' : 'runner_unavailable');
+      }
+      return parseRunnerResult(JSON.parse(output));
     });
-
-    await sandbox.writeFiles([
-      { path: 'solution.py', content: Buffer.from(code, 'utf8') },
-      { path: 'input.txt', content: Buffer.from(String(input_data), 'utf8') },
-      { path: 'runner.py', content: Buffer.from(RUNNER, 'utf8') },
-    ]);
-
-    const command = await sandbox.runCommand('python3', ['runner.py']);
-    const [output, error] = await Promise.all([command.stdout(), command.stderr()]);
 
     return res.status(200).json({
-      success: command.exitCode === 0,
-      output,
-      error,
-      execution_time: command.durationMs,
-      memory_usage: 0,
+      success: execution.outcome === 'OK',
+      output: execution.stdout,
+      error: publicRunError(execution.outcome, execution.stderr),
+      execution_time: execution.executionTimeMs,
     });
   } catch (error) {
-    console.error('Sandbox execution error:', error instanceof Error ? error.message : String(error));
+    console.error(JSON.stringify({
+      event: 'sandbox_run_error',
+      error: error instanceof Error ? error.name : 'UnknownError',
+    }));
     return res.status(500).json({
       success: false,
       error: '격리 실행 환경을 시작하지 못했습니다. 잠시 후 다시 시도해주세요.',
     });
-  } finally {
-    if (sandbox) {
-      try {
-        await sandbox.stop();
-      } catch (error) {
-        console.error('Sandbox cleanup error:', error instanceof Error ? error.message : String(error));
-      }
-    }
   }
 }

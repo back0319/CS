@@ -10,6 +10,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint . --ext .ts,.tsx",
+    "test": "npm run test:judge",
+    "test:judge": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --experimental-strip-types lib/*.test.ts",
     "data:convert": "ruby scripts/convert-csv.rb",
     "data:seed-sql": "node ../supabase/scripts/generate-problem-seed.mjs ../supabase/migrations/20260715013024_seed_beginner_problems.sql"
   },

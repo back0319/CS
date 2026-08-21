@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 
 interface CodeRunnerProps {
-  onRun: (code: string) => Promise<any>;
   isRunning: boolean;
   result?: {
     success: boolean;
@@ -12,7 +11,7 @@ interface CodeRunnerProps {
   } | null;
 }
 
-const CodeRunner: React.FC<CodeRunnerProps> = ({ onRun, isRunning, result }) => {
+const CodeRunner: React.FC<CodeRunnerProps> = ({ isRunning, result }) => {
   const [showDetails, setShowDetails] = useState(false);
 
   const formatExecutionTime = (time?: number) => {

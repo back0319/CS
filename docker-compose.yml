@@ -1,11 +1,16 @@
 
+name: didim-code-legacy-research
+
+# 연구용 FastAPI 프로토타입입니다. 현행 Vercel Production은 frontend/만 사용합니다.
+# 실행하려면 명시적으로: docker compose --profile legacy-research up
 services:
   frontend:
+    profiles: ["legacy-research"]
     build: ./frontend
     ports:
       - "3000:3000"
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=development
       - NEXT_PUBLIC_API_URL=http://localhost:8000
       - BACKEND_URL=http://backend:8000
     depends_on:
@@ -14,15 +19,16 @@ services:
       - app-network
 
   backend:
+    profiles: ["legacy-research"]
     build: ./backend
     ports:
       - "8000:8000"
     environment:
-      - ENVIRONMENT=production
+      - ENVIRONMENT=research
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - DB_HOST=my-app-db
       - DB_USER=postgres
-      - DB_PASSWORD=root
+      - DB_PASSWORD=${LEGACY_POSTGRES_PASSWORD:?set LEGACY_POSTGRES_PASSWORD}
       - DB_NAME=postgres
     networks:
       - app-network

@@ -1,7 +1,16 @@
+import { VERDICTS } from './judge-contract';
+import {
+  parseFeedbackConfig,
+  parseProblemRow,
+  parseTestCaseRow,
+  type Difficulty,
+  type ProblemFeedbackConfig,
+  type ProblemRow,
+  type TestCaseRow,
+} from './catalog-validation';
 import { getAdminSupabaseClient, getPublicSupabaseClient } from './supabase';
 
-export type Difficulty = 'Easy' | 'Medium' | 'Hard';
-export type Verdict = 'AC' | 'WA' | 'CE' | 'RE' | 'TLE';
+export type { Difficulty, ProblemFeedbackConfig } from './catalog-validation';
 
 export interface ProblemTestCase {
   id: number;
@@ -12,61 +21,14 @@ export interface ProblemTestCase {
   is_sample: boolean;
 }
 
-export interface Problem {
-  id: number;
-  slug: string;
-  display_order: number;
-  title: string;
-  description: string;
-  difficulty: Difficulty;
-  category: string;
-  input_format: string;
-  output_format: string;
-  constraints: string[];
-  starter_code: string;
+export interface Problem extends ProblemRow {
   test_cases: ProblemTestCase[];
-}
-
-export interface ProblemSolution {
-  code: string;
-  explanation: string | null;
-}
-
-export interface ProblemFeedbackConfig {
-  prompt_context: string;
-  common_mistakes: string[];
-  fallback_hints: Partial<Record<Verdict, string>>;
 }
 
 export interface JudgeProblemBundle {
   problem: Problem;
   test_cases: ProblemTestCase[];
-  solution: ProblemSolution;
   feedback: ProblemFeedbackConfig;
-}
-
-interface ProblemRow {
-  id: number;
-  slug: string;
-  display_order: number;
-  title: string;
-  description: string;
-  difficulty: Difficulty;
-  category: string;
-  input_format: string;
-  output_format: string;
-  constraints: string[];
-  starter_code: string;
-}
-
-interface TestCaseRow {
-  id: number;
-  problem_id: number;
-  case_order: number;
-  input_data: string;
-  expected_output: string;
-  explanation: string | null;
-  is_sample: boolean;
 }
 
 export class CatalogUnavailableError extends Error {
@@ -79,19 +41,19 @@ export class CatalogUnavailableError extends Error {
   }
 }
 
-function mapProblem(row: ProblemRow, testCases: TestCaseRow[] = []): Problem {
+function mapTestCase(row: TestCaseRow): ProblemTestCase {
   return {
-    ...row,
-    constraints: Array.isArray(row.constraints) ? row.constraints : [],
-    test_cases: testCases.map((testCase) => ({
-      id: testCase.id,
-      case_order: testCase.case_order,
-      input: testCase.input_data,
-      output: testCase.expected_output,
-      explanation: testCase.explanation || undefined,
-      is_sample: testCase.is_sample,
-    })),
+    id: row.id,
+    case_order: row.case_order,
+    input: row.input_data,
+    output: row.expected_output,
+    explanation: row.explanation || undefined,
+    is_sample: row.is_sample,
   };
+}
+
+function mapProblem(row: ProblemRow, testCases: TestCaseRow[] = []): Problem {
+  return { ...row, test_cases: testCases.map(mapTestCase) };
 }
 
 export async function getProblems(): Promise<Problem[]> {
@@ -103,7 +65,7 @@ export async function getProblems(): Promise<Problem[]> {
       .order('display_order');
 
     if (error) throw error;
-    return ((data || []) as ProblemRow[]).map((row) => mapProblem(row));
+    return (data || []).map((row) => mapProblem(parseProblemRow(row)));
   } catch (error) {
     throw new CatalogUnavailableError('문제 목록을 불러오지 못했습니다.', error);
   }
@@ -130,7 +92,7 @@ export async function getProblemById(id: number): Promise<Problem | null> {
     if (problemError) throw problemError;
     if (testCaseError) throw testCaseError;
     if (!problem) return null;
-    return mapProblem(problem as ProblemRow, (testCases || []) as TestCaseRow[]);
+    return mapProblem(parseProblemRow(problem), (testCases || []).map(parseTestCaseRow));
   } catch (error) {
     throw new CatalogUnavailableError('문제를 불러오지 못했습니다.', error);
   }
@@ -139,7 +101,7 @@ export async function getProblemById(id: number): Promise<Problem | null> {
 export async function getJudgeProblemBundle(id: number): Promise<JudgeProblemBundle | null> {
   try {
     const client = getAdminSupabaseClient();
-    const [problemResult, testCaseResult, solutionResult, feedbackResult] = await Promise.all([
+    const [problemResult, testCaseResult, feedbackResult] = await Promise.all([
       client
         .from('problems')
         .select('id, slug, display_order, title, description, difficulty, category, input_format, output_format, constraints, starter_code')
@@ -152,38 +114,34 @@ export async function getJudgeProblemBundle(id: number): Promise<JudgeProblemBun
         .eq('problem_id', id)
         .order('case_order'),
       client
-        .from('problem_solutions')
-        .select('code, explanation')
-        .eq('problem_id', id)
-        .eq('language', 'python')
-        .maybeSingle(),
-      client
         .from('problem_feedback_configs')
         .select('prompt_context, common_mistakes, fallback_hints')
         .eq('problem_id', id)
         .maybeSingle(),
     ]);
 
-    const error = problemResult.error || testCaseResult.error || solutionResult.error || feedbackResult.error;
+    const error = problemResult.error || testCaseResult.error || feedbackResult.error;
     if (error) throw error;
     if (!problemResult.data) return null;
-    if (!solutionResult.data || !feedbackResult.data || !testCaseResult.data?.length) {
+    if (!feedbackResult.data || !testCaseResult.data?.length) {
       throw new Error('채점 데이터가 완전하지 않습니다.');
     }
 
-    const testCases = (testCaseResult.data || []) as TestCaseRow[];
+    const testCases = testCaseResult.data.map(parseTestCaseRow);
+    if (!testCases.some((testCase) => testCase.is_sample)) {
+      throw new Error('공개 sample 테스트가 없습니다.');
+    }
+    if (!testCases.some((testCase) => !testCase.is_sample)) {
+      throw new Error('숨은 테스트가 없습니다.');
+    }
+
     return {
-      problem: mapProblem(problemResult.data as ProblemRow, testCases.filter((testCase) => testCase.is_sample)),
-      test_cases: testCases.map((testCase) => ({
-        id: testCase.id,
-        case_order: testCase.case_order,
-        input: testCase.input_data,
-        output: testCase.expected_output,
-        explanation: testCase.explanation || undefined,
-        is_sample: testCase.is_sample,
-      })),
-      solution: solutionResult.data as ProblemSolution,
-      feedback: feedbackResult.data as ProblemFeedbackConfig,
+      problem: mapProblem(
+        parseProblemRow(problemResult.data),
+        testCases.filter((testCase) => testCase.is_sample),
+      ),
+      test_cases: testCases.map(mapTestCase),
+      feedback: parseFeedbackConfig(feedbackResult.data, VERDICTS),
     };
   } catch (error) {
     throw new CatalogUnavailableError('채점 데이터를 불러오지 못했습니다.', error);
