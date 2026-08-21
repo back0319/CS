@@ -1,131 +1,24 @@
-import React, { useEffect, useMemo, useState } from 'react';
-
-interface EncodedObject {
-  [key: string]: EncodedValue;
-}
-
-type EncodedValue = string | number | boolean | null | EncodedValue[] | EncodedObject;
-type ValueKind = 'scalar' | 'list' | 'tuple' | 'dict' | 'set' | 'object';
-
-interface ValueState {
-  kind: ValueKind;
-  value: EncodedValue;
-  length?: number | null;
-  truncated_count?: number;
-}
-
-interface ItemChange {
-  key: string | number;
-  kind: 'created' | 'updated' | 'deleted';
-  before?: EncodedValue;
-  after?: EncodedValue;
-}
-
-interface VariableChange {
-  scope: 'global' | 'local';
-  call_id?: number | null;
-  name: string;
-  kind: 'created' | 'updated' | 'deleted' | 'mutated';
-  before?: ValueState;
-  after?: ValueState;
-  items?: ItemChange[];
-}
-
-interface CallBinding {
-  expression: string;
-  parameter: string;
-  value: EncodedValue;
-}
-
-interface CallSite {
-  line: number;
-  expression: string;
-  order: number;
-  bindings: CallBinding[];
-}
-
-interface StackFrame {
-  func_name: string;
-  call_id?: number;
-  encoded_locals: Record<string, EncodedValue>;
-  local_states?: Record<string, ValueState>;
-  ordered_varnames?: string[];
-  line_number: number;
-}
-
-interface CodeBlock {
-  type: 'function' | 'if_block' | 'else_block' | 'for_loop' | 'while_loop';
-  label: string;
-  name: string;
-  expression: string;
-  start_line: number;
-  end_line: number;
-  depth: number;
-}
-
-interface ControlState {
-  kind: 'condition' | 'loop' | 'loop_control';
-  result?: boolean;
-  iteration?: number;
-  finished?: boolean;
-  action?: 'break' | 'continue';
-}
-
-interface Step {
-  line: number;
-  operation: string;
-  statement_kind?: string;
-  phase?: 'before' | 'after' | 'call' | 'return' | 'error';
-  variables: Record<string, EncodedValue>;
-  variables_state?: Record<string, ValueState>;
-  output?: string;
-  output_delta?: string;
-  console_output?: string;
-  console_delta?: string;
-  description?: string;
-  stack_frames?: StackFrame[];
-  globals_vars?: Record<string, EncodedValue>;
-  globals_state?: Record<string, ValueState>;
-  func_name?: string;
-  call_id?: number;
-  current_blocks?: CodeBlock[];
-  condition_result?: boolean | null;
-  loop_iteration?: number | null;
-  loop_finished?: boolean;
-  control_state?: ControlState | null;
-  changes?: VariableChange[];
-  input_event?: { prompt: string; value: string } | null;
-  call_site?: CallSite | null;
-  return_value?: EncodedValue;
-}
-
-interface CallTreeNode {
-  id: number;
-  parent_id: number | null;
-  func_name: string;
-  arguments: Record<string, EncodedValue>;
-  call_step: number;
-  return_step: number | null;
-  return_value: EncodedValue;
-  error_step?: number | null;
-  call_site?: CallSite | null;
-}
-
-interface CodeToken {
-  name: string;
-  start: number;
-  end: number;
-  kind?: 'keyword' | 'builtin' | 'function' | 'identifier' | 'string' | 'number' | 'comment' | 'operator';
-}
-
-interface VisualizationData {
-  steps: Step[];
-  code_lines: string[];
-  call_tree?: CallTreeNode[];
-  tokens_by_line?: Record<string, CodeToken[]>;
-  truncated?: boolean;
-  truncation_reason?: string | null;
-}
+import React, { useEffect, useMemo, useReducer, useState } from 'react';
+import {
+  createReplayViewModel,
+  INITIAL_REPLAY_STATE,
+  parseVisualizationData,
+  replayReducer,
+  selectCallDepth,
+  selectCallStatus,
+  selectFrameArguments,
+  selectLatestControlStep,
+  type CallBinding,
+  type CallTreeNode,
+  type CodeBlock,
+  type CodeToken,
+  type EncodedValue,
+  type StackFrame,
+  type Step,
+  type ValueState,
+  type VariableChange,
+  type VisualizationData,
+} from '../lib/visualization-contract';
 
 interface VisualizationModalProps {
   isOpen: boolean;
@@ -144,6 +37,11 @@ const COLOR_PALETTE = [
   { highlight: 'bg-red-200 text-red-950', box: 'border-red-200 bg-red-50', text: 'text-red-900', accent: 'border-red-500' },
   { highlight: 'bg-orange-200 text-orange-950', box: 'border-orange-200 bg-orange-50', text: 'text-orange-900', accent: 'border-orange-500' },
 ] as const;
+
+const EMPTY_CALLS: CallTreeNode[] = [];
+const EMPTY_CALL_MAP = new Map<number, CallTreeNode>();
+const EMPTY_FRAMES: StackFrame[] = [];
+const EMPTY_NAMES = new Set<string>();
 
 const FUNCTION_COLOR = {
   highlight: 'bg-sky-200 text-sky-950',
@@ -447,10 +345,11 @@ export default function VisualizationModal({
   inputData = '',
 }: VisualizationModalProps) {
   const [visualizationData, setVisualizationData] = useState<VisualizationData | null>(null);
-  const [currentStep, setCurrentStep] = useState(0);
+  const [replayState, dispatchReplay] = useReducer(replayReducer, INITIAL_REPLAY_STATE);
+  const currentStep = replayState.stepIndex;
+  const isPlaying = replayState.isPlaying;
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
 
   useEffect(() => {
     if (!isOpen || !code) return;
@@ -458,7 +357,7 @@ export default function VisualizationModal({
     const generateVisualization = async () => {
       setIsLoading(true);
       setError(null);
-      setIsPlaying(false);
+      dispatchReplay({ type: 'pause' });
       try {
         const response = await fetch('/api/visualize', {
           method: 'POST',
@@ -468,8 +367,9 @@ export default function VisualizationModal({
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.message || '시각화 생성에 실패했습니다.');
-        setVisualizationData(data);
-        setCurrentStep(0);
+        const parsed = parseVisualizationData(data);
+        setVisualizationData(parsed);
+        dispatchReplay({ type: 'load', stepCount: parsed.steps.length });
       } catch (requestError) {
         if (requestError instanceof DOMException && requestError.name === 'AbortError') return;
         setError(requestError instanceof Error ? requestError.message : '시각화 생성 중 오류가 발생했습니다.');
@@ -484,10 +384,10 @@ export default function VisualizationModal({
   useEffect(() => {
     if (!isPlaying || !visualizationData) return;
     if (currentStep >= visualizationData.steps.length - 1) {
-      setIsPlaying(false);
+      dispatchReplay({ type: 'pause' });
       return;
     }
-    const timer = window.setTimeout(() => setCurrentStep((step) => step + 1), 850);
+    const timer = window.setTimeout(() => dispatchReplay({ type: 'next' }), 850);
     return () => window.clearTimeout(timer);
   }, [isPlaying, visualizationData, currentStep]);
 
@@ -500,68 +400,35 @@ export default function VisualizationModal({
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [isOpen, onClose]);
 
-  const step = visualizationData?.steps[currentStep];
-  const allCalls = useMemo(() => visualizationData?.call_tree || [], [visualizationData]);
-  const callsById = useMemo(() => new Map(allCalls.map((call) => [call.id, call])), [allCalls]);
-  const activeFrames = (step?.stack_frames || []).filter((frame) => frame.func_name !== 'Global frame');
-  const activeCallIds = new Set(
-    activeFrames.map((frame) => frame.call_id).filter((callId): callId is number => typeof callId === 'number'),
+  const replay = useMemo(
+    () => visualizationData ? createReplayViewModel(visualizationData, currentStep) : null,
+    [visualizationData, currentStep],
   );
-  const currentCallId = activeFrames[activeFrames.length - 1]?.call_id ?? step?.call_id;
-  const visibleNames = useMemo(() => {
-    const names = new Set(Object.keys(step?.variables_state || step?.variables || {}));
-    (step?.stack_frames || []).forEach((frame) => {
-      Object.keys(frame.local_states || frame.encoded_locals || {}).forEach((name) => names.add(name));
-    });
-    return names;
-  }, [step]);
+  const step = replay?.step;
+  const allCalls = replay?.allCalls || EMPTY_CALLS;
+  const callsById = replay?.callsById || EMPTY_CALL_MAP;
+  const activeFrames = replay?.activeFrames || EMPTY_FRAMES;
+  const currentCallId = replay?.currentCallId;
+  const visibleNames = replay?.visibleNames || EMPTY_NAMES;
 
   const frameArguments = (frame: StackFrame): Record<string, EncodedValue> => {
-    const call = typeof frame.call_id === 'number' ? callsById.get(frame.call_id) : undefined;
-    if (!call) return {};
-    return Object.fromEntries(
-      Object.entries(call.arguments).map(([name, initialValue]) => [
-        name,
-        Object.prototype.hasOwnProperty.call(frame.encoded_locals, name)
-          ? frame.encoded_locals[name]
-          : initialValue,
-      ]),
-    );
+    return replay ? selectFrameArguments(replay, frame) : {};
   };
 
   const latestControlStep = (block: CodeBlock): Step | undefined => {
-    if (!visualizationData || !step) return undefined;
-    for (let index = currentStep; index >= 0; index -= 1) {
-      const candidate = visualizationData.steps[index];
-      if (candidate.call_id === step.call_id && candidate.line === block.start_line) return candidate;
-    }
-    return undefined;
+    return visualizationData && replay
+      ? selectLatestControlStep(visualizationData, replay, block)
+      : undefined;
   };
 
   const callStatus = (call: CallTreeNode) => {
-    if (typeof call.error_step === 'number' && call.error_step <= currentStep) {
-      return { label: '오류', className: 'border-red-300 bg-red-50 text-red-900' };
-    }
-    if (call.id === currentCallId) {
-      return { label: '실행 중', className: 'border-amber-400 bg-amber-50 text-amber-950' };
-    }
-    if (activeCallIds.has(call.id)) {
-      return { label: '하위 호출 대기', className: 'border-amber-300 bg-amber-50 text-amber-950' };
-    }
-    if (call.return_step !== null && call.return_step <= currentStep) {
-      return { label: `반환 ${formatValue(call.return_value)}`, className: 'border-emerald-300 bg-emerald-50 text-emerald-950' };
-    }
-    return { label: '호출됨', className: 'border-gray-300 bg-white text-gray-800' };
+    return replay
+      ? selectCallStatus(replay, call, formatValue)
+      : { label: '호출됨', className: 'border-gray-300 bg-white text-gray-800' };
   };
 
   const callDepth = (call: CallTreeNode) => {
-    let depth = 0;
-    let parentId = call.parent_id;
-    while (parentId !== null && depth < 20) {
-      depth += 1;
-      parentId = callsById.get(parentId)?.parent_id ?? null;
-    }
-    return depth;
+    return replay ? selectCallDepth(replay, call) : 0;
   };
 
   const renderCurrentFlow = () => {
@@ -723,8 +590,8 @@ export default function VisualizationModal({
   };
 
   if (!isOpen) return null;
-  const lastStep = Math.max((visualizationData?.steps.length || 1) - 1, 0);
-  const progress = visualizationData ? ((currentStep + 1) / visualizationData.steps.length) * 100 : 0;
+  const lastStep = replay?.lastStep || 0;
+  const progress = replay?.progress || 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/60 p-4" role="dialog" aria-modal="true" aria-label="코드 시각화">
@@ -879,13 +746,13 @@ export default function VisualizationModal({
             <footer className="border-t border-gray-200 bg-white px-6 py-3">
               <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-1.5">
-                  <button onClick={() => setCurrentStep(0)} disabled={currentStep === 0} className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">처음</button>
-                  <button onClick={() => setCurrentStep((value) => Math.max(0, value - 1))} disabled={currentStep === 0} className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">이전</button>
-                  <button onClick={() => setIsPlaying((value) => !value)} className="rounded-md bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700">
+                  <button onClick={() => dispatchReplay({ type: 'first' })} disabled={currentStep === 0} className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">처음</button>
+                  <button onClick={() => dispatchReplay({ type: 'previous' })} disabled={currentStep === 0} className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">이전</button>
+                  <button onClick={() => dispatchReplay({ type: 'toggle' })} className="rounded-md bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700">
                     {isPlaying ? '일시정지' : '재생'}
                   </button>
-                  <button onClick={() => setCurrentStep((value) => Math.min(lastStep, value + 1))} disabled={currentStep >= lastStep} className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">다음</button>
-                  <button onClick={() => setCurrentStep(lastStep)} disabled={currentStep >= lastStep} className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">마지막</button>
+                  <button onClick={() => dispatchReplay({ type: 'next' })} disabled={currentStep >= lastStep} className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">다음</button>
+                  <button onClick={() => dispatchReplay({ type: 'last' })} disabled={currentStep >= lastStep} className="rounded-md border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">마지막</button>
                 </div>
                 <span className="text-xs font-medium text-gray-600">{currentStep + 1} / {visualizationData.steps.length}</span>
               </div>

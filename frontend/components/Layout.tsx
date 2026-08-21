@@ -19,9 +19,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         <meta name="description" content="Python 코드의 실행 흐름을 확인하고 핵심 힌트로 풀이를 개선하는 알고리즘 학습 프로젝트" />
         <meta name="theme-color" content="#4F46E5" />
         <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700;900&family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
       </Head>
       <div className="min-h-screen bg-gray-50 font-sans">
       {/* Header */}

@@ -1,6 +1,10 @@
 
+name: didim-code-legacy-database
+
+# 연구용 로컬 DB입니다. 실행하려면 --profile legacy-research를 명시하세요.
 services:
   my-app-db:
+    profiles: ["legacy-research"]
     container_name: "my-app-db"
     image: postgres
     ports:
@@ -12,18 +16,19 @@ services:
     environment:
       - "POSTGRES_DB=my-app-db"
       - "POSTGRES_USER=postgres"
-      - "POSTGRES_PASSWORD=root"
+      - "POSTGRES_PASSWORD=${LEGACY_POSTGRES_PASSWORD:?set LEGACY_POSTGRES_PASSWORD}"
     networks:
       - app-network
     
   pgadmin:
+    profiles: ["legacy-research"]
     container_name: "pgadmin"
     image: dpage/pgadmin4
     ports:
       - "5050:80"
     environment:
-      - "PGADMIN_DEFAULT_EMAIL=dldnfud0789@naver.com"
-      - "PGADMIN_DEFAULT_PASSWORD=dldnfud012"
+      - "PGADMIN_DEFAULT_EMAIL=${LEGACY_PGADMIN_EMAIL:?set LEGACY_PGADMIN_EMAIL}"
+      - "PGADMIN_DEFAULT_PASSWORD=${LEGACY_PGADMIN_PASSWORD:?set LEGACY_PGADMIN_PASSWORD}"
     networks:
       - app-network
     depends_on:

@@ -4,11 +4,14 @@ import builtins
 import io
 import json
 import keyword
+import os
+import sys
 import tokenize
 
 
 MAX_STEPS = 1000
 MAX_COLLECTION_ITEMS = 20
+MAX_OUTPUT_BYTES = 64 * 1024
 IGNORED_NAMES = {
     "__annotations__",
     "__builtins__",
@@ -426,6 +429,32 @@ class CodeAnalyzer:
 
 class TraceLimitExceeded(Exception):
     pass
+
+
+class TraceOutput(io.TextIOBase):
+    def __init__(self, tracer, capture=True):
+        self.tracer = tracer
+        self.capture = capture
+        self.size = 0
+
+    def writable(self):
+        return True
+
+    def write(self, value):
+        if not isinstance(value, str):
+            raise TypeError("write() argument must be str")
+        encoded_size = len(value.encode("utf-8"))
+        if self.size + encoded_size > MAX_OUTPUT_BYTES:
+            self.tracer.truncated = True
+            raise TraceLimitExceeded("출력이 64KiB 제한을 초과했습니다.")
+        self.size += encoded_size
+        if self.capture:
+            self.tracer.output.append(value)
+            self.tracer.console_output.append(value)
+        return len(value)
+
+    def flush(self):
+        return None
 
 
 class FrameTracer(bdb.Bdb):
@@ -928,30 +957,41 @@ def main():
     with open("request.json", "r", encoding="utf-8") as request_file:
         request = json.load(request_file)
     code = request["code"]
-    input_lines = iter(str(request.get("input_data", "")).splitlines())
     tracer = FrameTracer(code)
+    original_stdin = sys.stdin
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    original_dunder_stdout = sys.__stdout__
+    original_dunder_stderr = sys.__stderr__
+    original_stdout_fd = os.dup(1)
+    original_stderr_fd = os.dup(2)
+    null_fd = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(null_fd, 1)
+    os.dup2(null_fd, 2)
+    os.close(null_fd)
+    sys.stdin = io.StringIO(str(request.get("input_data", "")))
+    sys.stdout = TraceOutput(tracer)
+    sys.stderr = TraceOutput(tracer, capture=False)
+    sys.__stdout__ = sys.stdout
+    sys.__stderr__ = sys.stderr
 
-    def mock_input(prompt=""):
-        try:
-            value = next(input_lines)
-        except StopIteration:
-            value = ""
-        tracer.record_input(prompt, value)
-        tracer.console_output.append(f"{prompt}{value}\n")
+    def traced_input(prompt=""):
+        prompt_text = str(prompt)
+        if prompt_text:
+            sys.stdout.write(prompt_text)
+        line = sys.stdin.readline()
+        if line == "":
+            raise EOFError("EOF when reading a line")
+        value = line[:-1] if line.endswith("\n") else line
+        if value.endswith("\r"):
+            value = value[:-1]
+        tracer.record_input(prompt_text, value)
         return value
-
-    def mock_print(*args, **kwargs):
-        separator = kwargs.get("sep", " ")
-        ending = kwargs.get("end", "\n")
-        rendered = separator.join(str(arg) for arg in args) + ending
-        tracer.output.append(rendered)
-        tracer.console_output.append(rendered)
 
     environment = {
         "__builtins__": __builtins__,
         "__name__": "__main__",
-        "input": mock_input,
-        "print": mock_print,
+        "input": traced_input,
     }
     runtime_error = None
     try:
@@ -963,6 +1003,16 @@ def main():
         runtime_error = str(error)
     except BaseException as error:
         runtime_error = f"{type(error).__name__}: {error}"
+    finally:
+        sys.stdin = original_stdin
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        sys.__stdout__ = original_dunder_stdout
+        sys.__stderr__ = original_dunder_stderr
+        os.dup2(original_stdout_fd, 1)
+        os.dup2(original_stderr_fd, 2)
+        os.close(original_stdout_fd)
+        os.close(original_stderr_fd)
 
     tracer.finalize_remaining()
 
@@ -994,14 +1044,16 @@ def main():
             "call_sites": [],
         })
 
-    print(json.dumps({
+    payload = {
         "steps": tracer.steps,
         "code_lines": tracer.code_lines,
         "call_tree": tracer.call_tree,
         "tokens_by_line": tracer.analyzer.tokens_by_line,
         "truncated": tracer.truncated,
         "truncation_reason": runtime_error if tracer.truncated else None,
-    }, ensure_ascii=False))
+    }
+    with open("trace.json", "w", encoding="utf-8") as trace_file:
+        json.dump(payload, trace_file, ensure_ascii=False)
 
 
 if __name__ == "__main__":

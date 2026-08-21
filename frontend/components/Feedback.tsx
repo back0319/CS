@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 
 interface FeedbackItem {
   id: number;
@@ -10,43 +10,16 @@ interface FeedbackItem {
 }
 
 interface FeedbackProps {
-  onRun: (code: string) => Promise<any>;
-  isRunning: boolean;
-  result?: {
-    success: boolean;
-    output?: string;
-    error?: string;
-    executionTime?: number;
-    memoryUsage?: number;
-  } | null;
   aiFeedback?: FeedbackItem[];
   isAnalyzing?: boolean;
   submissionVerdict?: string;
 }
 
 const Feedback: React.FC<FeedbackProps> = ({ 
-  onRun, 
-  isRunning, 
-  result, 
   aiFeedback = [], 
   isAnalyzing = false,
   submissionVerdict 
 }) => {
-  const [showDetails, setShowDetails] = useState(false);
-
-  const formatExecutionTime = (time?: number) => {
-    if (!time) return 'N/A';
-    if (time < 1000) return `${time}ms`;
-    return `${(time / 1000).toFixed(2)}s`;
-  };
-
-  const formatMemoryUsage = (memory?: number) => {
-    if (!memory) return 'N/A';
-    if (memory < 1024) return `${memory}B`;
-    if (memory < 1024 * 1024) return `${(memory / 1024).toFixed(2)}KB`;
-    return `${(memory / (1024 * 1024)).toFixed(2)}MB`;
-  };
-
   const getSeverityColor = (severity: string) => {
     switch (severity) {
       case 'error': return 'bg-red-50 border-red-200 text-red-800';

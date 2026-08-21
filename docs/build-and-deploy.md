@@ -125,3 +125,5 @@ Preview와 Production의 Supabase 데이터를 분리하지 않는 경우 Previe
 ## 초기 연구 프로토타입
 
 루트의 `backend`, `docker-compose.yml`, `docker-compose-db.yml`, [DMOJ_INTEGRATION_GUIDE.md](../DMOJ_INTEGRATION_GUIDE.md)는 FastAPI·DMOJ 기반 초기 연구 단계의 자산입니다. 현재 Vercel Production 배포에는 사용하지 않으며, 새 운영 변경은 `frontend`와 이 문서를 기준으로 합니다.
+
+연구 stack은 격리 계약을 충족하지 않으므로 외부에 노출하거나 배포하지 않습니다. Compose 서비스에는 `legacy-research` profile이 설정되어 있어 `docker compose up`만으로는 시작되지 않습니다. 로컬 연구가 필요한 경우에만 `.env.example`의 placeholder를 별도 `.env` 값으로 교체한 뒤 profile을 명시합니다.

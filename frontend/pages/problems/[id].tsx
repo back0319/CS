@@ -6,6 +6,7 @@ import Layout from '../../components/Layout';
 import CodeRunner from '../../components/CodeRunner';
 import Feedback from '../../components/Feedback';
 import { getProblemById } from '../../lib/catalog';
+import { useExecutionAttempt } from '../../lib/use-execution-attempt';
 
 // Monaco Editor를 동적으로 로드 (SSR 이슈 방지)
 const MonacoEditor = dynamic(() => import('../../components/MonacoEditor'), {
@@ -47,23 +48,6 @@ interface Problem {
   example_explanation?: string;
 }
 
-interface Feedback {
-  id: number;
-  type: string;
-  title: string;
-  message: string;
-  code_suggestion?: string;
-  severity: 'info' | 'warning' | 'error';
-}
-
-interface SubmissionResult {
-  id: number;
-  verdict: string;
-  execution_time: number;
-  memory_usage: number;
-  feedback: Feedback[];
-}
-
 interface ProblemSolvePageProps {
   problem: Problem | null;
   loadError: string | null;
@@ -88,9 +72,8 @@ export default function ProblemSolvePage({ problem, loadError }: ProblemSolvePag
   const router = useRouter();
   const defaultInput = getDefaultInput(problem);
   const [code, setCode] = useState(problem?.starter_code || CODE_TEMPLATE);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submissionResult, setSubmissionResult] = useState<SubmissionResult | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const execution = useExecutionAttempt();
+  const resetExecution = execution.reset;
   
   // 시각화 모달 관련 state
   const [isVisualizationModalOpen, setIsVisualizationModalOpen] = useState(false);
@@ -99,19 +82,8 @@ export default function ProblemSolvePage({ problem, loadError }: ProblemSolvePag
   useEffect(() => {
     setCode(problem?.starter_code || CODE_TEMPLATE);
     setInputForVisualization(defaultInput);
-    setRunResult(null);
-    setSubmissionResult(null);
-  }, [defaultInput, problem?.id, problem?.starter_code]);
-  
-  // 코드 실행 관련 state
-  const [isRunning, setIsRunning] = useState(false);
-  const [runResult, setRunResult] = useState<{
-    success: boolean;
-    output?: string;
-    error?: string;
-    executionTime?: number;
-    memoryUsage?: number;
-  } | null>(null);
+    resetExecution();
+  }, [defaultInput, problem?.id, problem?.starter_code, resetExecution]);
 
   const handleSubmit = async () => {
     if (!code.trim()) {
@@ -119,76 +91,7 @@ export default function ProblemSolvePage({ problem, loadError }: ProblemSolvePag
       return;
     }
 
-    setIsSubmitting(true);
-    setIsAnalyzing(true);
-    
-    try {
-      // 1. 먼저 사용자 입력 데이터로 코드 실행하여 실행 결과 표시
-      try {
-        const runResponse = await fetch('/api/run', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            code: code,
-            language: 'python',
-            input_data: inputForVisualization
-          })
-        });
-
-        if (runResponse.ok) {
-          const runData = await runResponse.json();
-          setRunResult({
-            success: runData.success || false,
-            output: runData.output || '',
-            error: runData.error || '',
-            executionTime: runData.execution_time || 0,
-            memoryUsage: runData.memory_usage || 0
-          });
-        }
-      } catch (runError) {
-        console.error('실행 오류:', runError);
-        // 실행 실패해도 제출은 계속 진행
-      }
-
-      // 2. 코드 제출 및 채점
-      const response = await fetch('/api/submit', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          problem_id: problem?.id,
-          code: code,
-          language: 'python'
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('제출에 실패했습니다.');
-      }
-
-      const result = await response.json();
-      
-      // 3. 기본 채점 결과 표시
-      setSubmissionResult({
-        id: result.submission_id,
-        verdict: result.verdict || 'Pending',
-        execution_time: result.execution_time || 0,
-        memory_usage: result.memory_usage || 0,
-        feedback: result.feedback || []
-      });
-
-      setIsAnalyzing(false);
-
-    } catch (error) {
-      console.error('제출 오류:', error);
-      setIsAnalyzing(false);
-      alert('제출 중 오류가 발생했습니다.');
-    } finally {
-      setIsSubmitting(false);
-    }
+    if (problem) await execution.submit(problem.id, code);
   };
 
   const handleRun = async () => {
@@ -197,44 +100,7 @@ export default function ProblemSolvePage({ problem, loadError }: ProblemSolvePag
       return;
     }
 
-    setIsRunning(true);
-    setRunResult(null);
-
-    try {
-      const response = await fetch('/api/run', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          code: code,
-          language: 'python',
-          input_data: inputForVisualization  // 시각화와 동일한 입력 데이터 사용
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('코드 실행에 실패했습니다.');
-      }
-
-      const result = await response.json();
-      setRunResult({
-        success: result.success || false,
-        output: result.output || '',
-        error: result.error || '',
-        executionTime: result.execution_time || 0,
-        memoryUsage: result.memory_usage || 0
-      });
-
-    } catch (error) {
-      console.error('실행 오류:', error);
-      setRunResult({
-        success: false,
-        error: error instanceof Error ? error.message : '알 수 없는 오류가 발생했습니다.'
-      });
-    } finally {
-      setIsRunning(false);
-    }
+    await execution.run(code, inputForVisualization);
   };
 
   if (!problem) {
@@ -428,7 +294,10 @@ export default function ProblemSolvePage({ problem, loadError }: ProblemSolvePag
                 <div className="border border-gray-300 rounded-lg overflow-hidden">
                   <MonacoEditor
                     value={code}
-                    onChange={(value) => setCode(value || '')}
+                    onChange={(value) => {
+                      setCode(value || '');
+                      execution.reset();
+                    }}
                     language="python"
                     theme="vs-dark"
                     height="500px"
@@ -445,7 +314,10 @@ export default function ProblemSolvePage({ problem, loadError }: ProblemSolvePag
                   </label>
                   <textarea
                     value={inputForVisualization}
-                      onChange={(e) => setInputForVisualization(e.target.value)}
+                    onChange={(e) => {
+                      setInputForVisualization(e.target.value);
+                      execution.reset();
+                    }}
                     placeholder="예: 5"
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
                     rows={2}
@@ -456,20 +328,25 @@ export default function ProblemSolvePage({ problem, loadError }: ProblemSolvePag
                 </div>
 
                 {/* 실행 버튼들 */}
+                {execution.error && (
+                  <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">
+                    {execution.error}
+                  </p>
+                )}
                 <div className="flex space-x-3">
                   <button
                     onClick={handleRun}
-                    disabled={isRunning}
+                    disabled={execution.isBusy}
                     className="flex-1 bg-gray-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
-                    {isRunning ? '실행 중...' : '실행'}
+                    {execution.isRunning ? '실행 중...' : '실행'}
                   </button>
                   <button
                     onClick={handleSubmit}
-                    disabled={isSubmitting}
+                    disabled={execution.isBusy}
                     className="flex-1 bg-indigo-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
-                    {isSubmitting ? '제출 중...' : '제출'}
+                    {execution.isSubmitting ? '제출 중...' : '제출'}
                   </button>
                 </div>
               </div>
@@ -478,21 +355,17 @@ export default function ProblemSolvePage({ problem, loadError }: ProblemSolvePag
             {/* 실행 결과패널 */}
             <div className="lg:col-span-2 bg-white rounded-lg shadow-lg overflow-hidden">
               <CodeRunner
-                onRun={handleRun}
-                isRunning={isRunning}
-                result={runResult}
+                isRunning={execution.isRunning}
+                result={execution.runResult}
               />
             </div>
 
             {/* 피드백 패널 */}
             <div className="lg:col-span-3 bg-white rounded-lg shadow-lg overflow-hidden">
               <Feedback
-                onRun={handleRun}
-                isRunning={isRunning}
-                result={runResult}
-                aiFeedback={submissionResult?.feedback}
-                isAnalyzing={isAnalyzing}
-                submissionVerdict={submissionResult?.verdict}
+                aiFeedback={execution.submissionResult?.feedback}
+                isAnalyzing={execution.isSubmitting}
+                submissionVerdict={execution.submissionResult?.verdict}
               />
             </div>
           </div>
